@@ -5,7 +5,9 @@ from tinygrad.helpers import getenv, colored
 from extra.datasets import fetch_mnist
 from tqdm import trange
 
-GPUS = [f'{Device.DEFAULT}:{i}' for i in range(getenv("GPUS", 2))]
+# GPUS = [f'{Device.DEFAULT}:{0}' for i in range(getenv("GPUS", 2))]
+# GPUS = [f'REMOTE:127.0.0.1:8086:METAL:{0}' for i in range(getenv("GPUS", 2))]
+GPUS = [f'REMOTE:127.0.0.1:8085:METAL:{0}', f'REMOTE:127.0.0.1:8086:METAL:{0}']
 
 class Model:
   def __init__(self):

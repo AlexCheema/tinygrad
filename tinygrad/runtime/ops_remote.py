@@ -2,7 +2,7 @@ from typing import Tuple, Optional
 import pickle, time, socket
 from tinygrad.device import Compiled, Compiler, Allocator
 from tinygrad.renderer import Renderer
-from tinygrad.renderer.cstyle import CUDARenderer, HIPRenderer
+from tinygrad.renderer.cstyle import CUDARenderer, HIPRenderer, OpenCLRenderer, MetalRenderer
 from tinygrad.codegen.uops import UOpGraph
 
 def RemoteProgram(s: socket.socket):
@@ -26,6 +26,8 @@ class RemoteRenderer(Renderer):
     self.device, self.rdevice = device, rdevice
     if rdevice.startswith("CUDA"): self.rrenderer = CUDARenderer("sm_89")
     elif rdevice.startswith("HSA"): self.rrenderer = HIPRenderer()
+    elif rdevice.startswith("GPU"): self.rrenderer = OpenCLRenderer()
+    elif rdevice.startswith("METAL"): self.rrenderer = MetalRenderer()
     else: raise ValueError(f"Unsupported device {device}")
   def render(self, name:str, uops:UOpGraph) -> str: return self.rrenderer.render(name, uops)
 
@@ -57,9 +59,9 @@ class RemoteAllocator(Allocator):
     self.s.sendall(b"\x03" + args)
     self.s.recv(1)
   def copyin(self, dest, src:memoryview):
-    self.s.sendall(b"\x04" + int(dest.value).to_bytes(8, "little") + src.tobytes())
+    self.s.sendall(b"\x04" + int(dest).to_bytes(8, "little") + src.tobytes())
   def copyout(self, dest:memoryview, src):
-    self.s.sendall(b"\x05" + int(src.value).to_bytes(8, "little"))
+    self.s.sendall(b"\x05" + int(src).to_bytes(8, "little"))
     total = 0
     while total < dest.nbytes:
       recv = self.s.recv_into(dest[total:], dest.nbytes - total)
@@ -71,6 +73,7 @@ class RemoteDevice(Compiled):
     ip = device.split(":")[0]
     port = device.split(":")[1]
     rdevice = device[len(ip)+1+len(port)+1:]
+    print("connecting to socket", ip, port, rdevice)
 
     # open up socket to remote device
     self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
