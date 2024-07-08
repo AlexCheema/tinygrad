@@ -84,7 +84,6 @@ class MetalAllocator(LRUAllocator):
   def _free(self, opaque:Any, options): opaque.release()
   def as_buffer(self, src:Any) -> memoryview:
     self.device.synchronize()
-    print("src", src)
     return src.contents().as_buffer(src.length())
   def copyin(self, dest:Any, src:memoryview): self.as_buffer(dest)[:] = src
   def copyout(self, dest:memoryview, src:Any): dest[:] = self.as_buffer(src)

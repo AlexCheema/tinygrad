@@ -73,7 +73,6 @@ class RemoteDevice(Compiled):
     ip = device.split(":")[0]
     port = device.split(":")[1]
     rdevice = device[len(ip)+1+len(port)+1:]
-    print("connecting to socket", ip, port, rdevice)
 
     # open up socket to remote device
     self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

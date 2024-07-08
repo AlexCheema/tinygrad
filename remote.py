@@ -14,8 +14,6 @@ if __name__ == "__main__":
       super().__init__(*args, **kwargs)
 
     def handle(self):
-      print("RemoteHandler", self.request)
-
       programs = {}
       buffers = {}
       allocators_dict = {}
@@ -25,32 +23,25 @@ if __name__ == "__main__":
         match cmd:
           case b"\x00": # device
             device = self.request.recv(1024).decode("utf-8")
-            print(f"device {device=}")
             self.device = Device[device]
             self.request.send(b"\x00")
           case b"\x01": # synchronize
-            print("synchronize")
             self.device.synchronize()
             self.request.send(b"\x00")
           case b"\x02": # allocate
             size, options = pickle.loads(self.request.recv(1024))
-            print(f"allocate {size=}, {options=}")
             opaque = self.device.allocator.alloc(size, options)
-            print("opaque hash", hash(opaque))
             allocators_dict[hash(opaque)] = opaque
             buffers[hash(opaque)] = bytearray(size)
             pickled = pickle.dumps(hash(opaque))
             self.request.sendall(pickled)
           case b"\x03": # free
             opaque, options = pickle.loads(self.request.recv(1024))
-            print(f"free {opaque=}, {options=}")
             del buffers[opaque]
             self.device.allocator.free(allocators_dict[opaque], 0, options)
             self.request.send(b"\x00")
           case b"\x04": # copyin
             dest = ctypes.c_ulong(int.from_bytes(self.request.recv(8), "little"))
-            print(f"copyin {dest=}")
-            print("buf", buffers[dest.value])
             src = memoryview(buffers[dest.value])
             total = 0
             while total < src.nbytes:
@@ -59,13 +50,11 @@ if __name__ == "__main__":
             self.device.allocator.copyin(allocators_dict[dest.value], src)
           case b"\x05": # copyout
             src = ctypes.c_ulong(int.from_bytes(self.request.recv(8), "little"))
-            print(f"copyout {src=}")
             dest = buffers[src.value]
             self.device.allocator.copyout(memoryview(dest), allocators_dict[src.value])
             self.request.sendall(dest)
           case b"\x06": # compile
             nbytes = int.from_bytes(self.request.recv(4), "little")
-            print(f"compile {nbytes=}")
             src_bytes = bytearray(nbytes)
             src_view = memoryview(src_bytes)
             total = 0
@@ -77,7 +66,6 @@ if __name__ == "__main__":
             self.request.sendall(len(compiled).to_bytes(4, "little") + compiled)
           case b"\x07": # load
             name, nbytes, iden = pickle.loads(self.request.recv(1024))
-            print(f"load {name=}, {nbytes=}, {iden=}")
             self.request.send(b"\x00")
             lib = bytearray(nbytes)
             lib_view = memoryview(lib)
@@ -90,7 +78,6 @@ if __name__ == "__main__":
           case b"\x08": # run
             name, bufs, global_size, local_size, vals, wait, iden = pickle.loads(self.request.recv(4096))
             bufs = [allocators_dict[buf] for buf in bufs]
-            print(f"run {name=}, {bufs=}, {global_size=}, {local_size=}, {vals=}, {wait=}, {iden=}")
             try: programs[iden](*bufs, global_size=global_size, local_size=local_size, vals=vals, wait=wait)
             except: failed = 1
             else: failed = 0
@@ -102,7 +89,6 @@ if __name__ == "__main__":
           case _: print(f"Unknown {cmd=}")
       self.request.close()
 
-  print(f"starting TCP server on port {args.port}")
   server = TCPServer(("0.0.0.0", args.port), RemoteHandler)
   server.allow_reuse_address = True
   server.allow_reuse_port = True

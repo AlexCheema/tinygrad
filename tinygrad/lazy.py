@@ -119,8 +119,6 @@ class LazyBuffer:
     # no COPY
     if self.device == device: return self
 
-    print("copy_to_device", device)
-
     # double COPY = one COPY
     if not force and self.st.contiguous and self.size == self.base.size and not self.base.realized and self.base.op is LoadOps.COPY:
       return self.base.srcs[0].copy_to_device(device).reshape(self.st.shape)
