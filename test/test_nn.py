@@ -5,7 +5,8 @@ import torch
 from tinygrad import Tensor, Device, TinyJit
 from tinygrad.helpers import CI, Context
 from tinygrad.ops import BufferOps
-from tinygrad.nn import BatchNorm2d, Conv1d,ConvTranspose1d, Conv2d,ConvTranspose2d, Linear, GroupNorm, LayerNorm,LayerNorm2d, Embedding, InstanceNorm
+from tinygrad.nn import Conv1d, ConvTranspose1d, Conv2d, ConvTranspose2d, Linear, Embedding
+from tinygrad.nn import BatchNorm2d, LayerNorm, LayerNorm2d, GroupNorm, InstanceNorm, RMSNorm
 from tinygrad.nn.state import load_state_dict
 from tinygrad.engine.schedule import create_schedule
 from tinygrad.engine.realize import run_schedule
@@ -15,14 +16,14 @@ class TestNN(unittest.TestCase):
   @unittest.skipIf(Device.DEFAULT == "WEBGPU", "no int64 on WebGPU")
   def test_sparse_cat_cross_entropy(self):
     # create in tinygrad
-    input = Tensor.randn(5, 5)
+    input_tensor = Tensor.randn(5, 5)
     target = Tensor([0, 0, 0, 1, 2])  # torch doesn't support target=-1
-    torch_input = torch.tensor(input.numpy())
+    torch_input = torch.tensor(input_tensor.numpy())
     torch_target = torch.tensor(target.numpy(), dtype=torch.long)
 
     for smoothing in [0.0, 0.1, 0.5, 1.0]:
       for ignore_index in [-1, 0, 2]:
-        loss = input.sparse_categorical_crossentropy(target, label_smoothing=smoothing, ignore_index=ignore_index)
+        loss = input_tensor.sparse_categorical_crossentropy(target, label_smoothing=smoothing, ignore_index=ignore_index)
         torch_loss = torch.nn.CrossEntropyLoss(reduction='mean', label_smoothing=smoothing, ignore_index=ignore_index)(torch_input, torch_target)
         np.testing.assert_allclose(loss.numpy(), torch_loss.detach().numpy(), atol=1e-5, rtol=1e-6)
 
@@ -227,97 +228,166 @@ class TestNN(unittest.TestCase):
   def test_groupnorm(self):
     BS, H, W, C, G = 20, 10, 10, 6, 3
 
+    # create in torch
+    torch_layer = torch.nn.GroupNorm(G, C).eval()
+
     # create in tinygrad
     layer = GroupNorm(G, C)
+    layer.weight = Tensor(torch_layer.weight.detach().numpy(), requires_grad=True)
+    layer.bias = Tensor(torch_layer.bias.detach().numpy(), requires_grad=True)
 
-    # create in torch
-    with torch.no_grad():
-      torch_layer = torch.nn.GroupNorm(G, C).eval()
-      torch_layer.weight[:] = torch.tensor(layer.weight.numpy(), dtype=torch.float32)
-      torch_layer.bias[:] = torch.tensor(layer.bias.numpy(), dtype=torch.float32)
+    for _ in range(10):
+      # forward
+      x = Tensor.randn(BS, C, H, W, requires_grad=True)
+      z = layer(x)
+      torch_x = torch.tensor(x.numpy(), requires_grad=True)
+      torch_z = torch_layer(torch_x)
+      np.testing.assert_allclose(z.numpy(), torch_z.detach().numpy(), atol=5e-6, rtol=5e-6)
 
-    # test
-    x = Tensor.randn(BS, C, H, W)
-    z = layer(x)
-    torch_x = torch.tensor(x.numpy())
-    torch_z = torch_layer(torch_x)
-    np.testing.assert_allclose(z.numpy(), torch_z.detach().numpy(), atol=5e-3, rtol=5e-3)
+      # backward
+      z.sum().backward()
+      torch_z.sum().backward(retain_graph=True)
+      np.testing.assert_allclose(x.grad.numpy(), torch_x.grad.detach().numpy(), atol=5e-4, rtol=5e-4)
+      np.testing.assert_allclose(layer.weight.grad.numpy(), torch_layer.weight.grad.detach().numpy(), atol=5e-4, rtol=5e-4)
+      np.testing.assert_allclose(layer.bias.grad.numpy(), torch_layer.bias.grad.detach().numpy(), atol=5e-4, rtol=5e-4)
 
   def test_layernorm(self):
     N, C, H, W = 20, 5, 10, 10
 
+    # create in torch
+    torch_layer = torch.nn.LayerNorm([H, W]).eval()
+
     # create in tinygrad
     layer = LayerNorm([H, W])
+    layer.weight = Tensor(torch_layer.weight.detach().numpy(), requires_grad=True)
+    layer.bias = Tensor(torch_layer.bias.detach().numpy(), requires_grad=True)
 
-    # create in torch
-    with torch.no_grad():
-      torch_layer = torch.nn.LayerNorm([H, W]).eval()
-      torch_layer.weight[:] = torch.tensor(layer.weight.numpy(), dtype=torch.float32)
-      torch_layer.bias[:] = torch.tensor(layer.bias.numpy(), dtype=torch.float32)
+    for _ in range(10):
+      # forward
+      x = Tensor.randn(N, C, H, W, requires_grad=True)
+      z = layer(x)
+      torch_x = torch.tensor(x.numpy(), requires_grad=True)
+      torch_z = torch_layer(torch_x)
+      np.testing.assert_allclose(z.numpy(), torch_z.detach().numpy(), atol=5e-6, rtol=5e-6)
 
-    # test
-    x = Tensor.randn(N, C, H, W)
-    z = layer(x)
-    torch_x = torch.tensor(x.numpy())
-    torch_z = torch_layer(torch_x)
-    np.testing.assert_allclose(z.numpy(), torch_z.detach().numpy(), atol=5e-3, rtol=5e-3)
+      # backward
+      z.sum().backward()
+      torch_z.sum().backward(retain_graph=True)
+      np.testing.assert_allclose(x.grad.numpy(), torch_x.grad.detach().numpy(), atol=5e-4, rtol=5e-4)
+      np.testing.assert_allclose(layer.weight.grad.numpy(), torch_layer.weight.grad.detach().numpy(), atol=5e-4, rtol=5e-4)
+      np.testing.assert_allclose(layer.bias.grad.numpy(), torch_layer.bias.grad.detach().numpy(), atol=5e-4, rtol=5e-4)
 
   def test_layernorm_2d(self):
     N, C, H, W = 20, 5, 10, 10
 
+    # create in torch
+    torch_layer = torch.nn.LayerNorm([C]).eval()
+
     # create in tinygrad
     layer = LayerNorm2d(C)
+    layer.weight = Tensor(torch_layer.weight.detach().numpy(), requires_grad=True)
+    layer.bias = Tensor(torch_layer.bias.detach().numpy(), requires_grad=True)
 
-    # create in torch
-    with torch.no_grad():
-      torch_layer = torch.nn.LayerNorm([C]).eval()
-      torch_layer.weight[:] = torch.tensor(layer.weight.numpy(), dtype=torch.float32)
-      torch_layer.bias[:] = torch.tensor(layer.bias.numpy(), dtype=torch.float32)
+    for _ in range(10):
+      # forward
+      x = Tensor.randn(N, C, H, W, requires_grad=True)
+      z = layer(x)
+      torch_x = torch.tensor(x.numpy(), requires_grad=True)
+      torch_z = torch_layer(torch_x.permute(0,2,3,1)).permute(0,3,1,2)
+      np.testing.assert_allclose(z.numpy(), torch_z.detach().numpy(), atol=5e-6, rtol=5e-6)
 
-    # test
-    x = Tensor.randn(N, C, H, W)
-    z = layer(x)
-    torch_x = torch.tensor(x.numpy())
-    torch_z = torch_layer(torch_x.permute(0,2,3,1)).permute(0,3,1,2)
-    np.testing.assert_allclose(z.numpy(), torch_z.detach().numpy(), atol=5e-3, rtol=5e-3)
+      # backward
+      z.sum().backward()
+      torch_z.sum().backward(retain_graph=True)
+      np.testing.assert_allclose(x.grad.numpy(), torch_x.grad.detach().numpy(), atol=5e-4, rtol=5e-4)
+      np.testing.assert_allclose(layer.weight.grad.numpy(), torch_layer.weight.grad.detach().numpy(), atol=5e-4, rtol=5e-4)
+      np.testing.assert_allclose(layer.bias.grad.numpy(), torch_layer.bias.grad.detach().numpy(), atol=5e-4, rtol=5e-4)
 
   def test_instancenorm_2d(self):
-    N, C, H, W = 20, 5, 10, 10
+    N, C, H, W = 20, 10, 10, 10
+
+    # create in torch
+    torch_layer = torch.nn.InstanceNorm2d(C, affine=True).eval()
 
     # create in tinygrad
     layer = InstanceNorm(C)
+    layer.weight = Tensor(torch_layer.weight.detach().numpy(), requires_grad=True)
+    layer.bias = Tensor(torch_layer.bias.detach().numpy(), requires_grad=True)
 
-    # create in torch
-    with torch.no_grad():
-      torch_layer = torch.nn.InstanceNorm2d(C, affine=True).eval()
-      torch_layer.weight[:] = torch.tensor(layer.weight.numpy(), dtype=torch.float32)
-      torch_layer.bias[:] = torch.tensor(layer.bias.numpy(), dtype=torch.float32)
+    for _ in range(10):
+      # forward
+      x = Tensor.randn(N, C, H, W, requires_grad=True)
+      z = layer(x)
+      torch_x = torch.tensor(x.numpy(), requires_grad=True)
+      torch_z = torch_layer(torch_x)
+      np.testing.assert_allclose(z.numpy(), torch_z.detach().numpy(), atol=5e-6, rtol=5e-6)
 
-    # test
-    x = Tensor.randn(N, C, H, W)
-    z = layer(x)
-    torch_x = torch.tensor(x.numpy())
-    torch_z = torch_layer(torch_x)
-    np.testing.assert_allclose(z.numpy(), torch_z.detach().numpy(), atol=5e-3, rtol=5e-3)
+      # backward
+      z.sum().backward()
+      torch_z.sum().backward(retain_graph=True)
+      np.testing.assert_allclose(x.grad.numpy(), torch_x.grad.detach().numpy(), atol=1e-3, rtol=1e-3)
+      np.testing.assert_allclose(layer.weight.grad.numpy(), torch_layer.weight.grad.detach().numpy(), atol=1e-3, rtol=1e-3)
+      np.testing.assert_allclose(layer.bias.grad.numpy(), torch_layer.bias.grad.detach().numpy(), atol=1e-3, rtol=1e-3)
 
   def test_instancenorm_3d(self):
-    N, C, D, H, W = 20, 5, 3, 10, 10
+    N, C, D, H, W = 20, 10, 10, 10, 10
+
+    # create in torch
+    torch_layer = torch.nn.InstanceNorm3d(C, affine=True).eval()
 
     # create in tinygrad
     layer = InstanceNorm(C)
+    layer.weight = Tensor(torch_layer.weight.detach().numpy(), requires_grad=True)
+    layer.bias = Tensor(torch_layer.bias.detach().numpy(), requires_grad=True)
 
-    # create in torch
-    with torch.no_grad():
-      torch_layer = torch.nn.InstanceNorm3d(C, affine=True).eval()
-      torch_layer.weight[:] = torch.tensor(layer.weight.numpy(), dtype=torch.float32)
-      torch_layer.bias[:] = torch.tensor(layer.bias.numpy(), dtype=torch.float32)
+    for _ in range(10):
+      # forward
+      x = Tensor.randn(N, C, D, H, W, requires_grad=True)
+      z = layer(x)
+      torch_x = torch.tensor(x.numpy(), requires_grad=True)
+      torch_z = torch_layer(torch_x)
+      np.testing.assert_allclose(z.numpy(), torch_z.detach().numpy(), atol=5e-6, rtol=5e-6)
 
-    # test
-    x = Tensor.randn(N, C, D, H, W)
-    z = layer(x)
-    torch_x = torch.tensor(x.numpy())
-    torch_z = torch_layer(torch_x)
-    np.testing.assert_allclose(z.numpy(), torch_z.detach().numpy(), atol=5e-3, rtol=5e-3)
+      # backward
+      z.sum().backward()
+      torch_z.sum().backward(retain_graph=True)
+      np.testing.assert_allclose(x.grad.numpy(), torch_x.grad.detach().numpy(), atol=1e-3, rtol=1e-3)
+      np.testing.assert_allclose(layer.weight.grad.numpy(), torch_layer.weight.grad.detach().numpy(), atol=2e-3, rtol=1e-3)
+      np.testing.assert_allclose(layer.bias.grad.numpy(), torch_layer.bias.grad.detach().numpy(), atol=1e-3, rtol=1e-3)
+
+  def test_rmsnorm(self):
+    class TorchRMSNorm(torch.nn.Module):
+      # https://github.com/meta-llama/llama/blob/be327c427cc5e89cc1d3ab3d3fec4484df771245/llama/model.py#L34C1-L77C36
+      def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = torch.nn.Parameter(torch.ones(dim))
+
+      def _norm(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+      def forward(self, x):
+        output = self._norm(x.float()).type_as(x)
+        return output * self.weight
+
+    B, T, embed_size = 4, 10, 20
+    torch_layer = TorchRMSNorm(embed_size)
+    layer = RMSNorm(embed_size)
+    layer.weight.requires_grad = True
+
+    for _ in range(10):
+      # forward
+      x = Tensor.randn(B, T, embed_size, requires_grad=True)
+      z = layer(x)
+      torch_x = torch.tensor(x.numpy(), requires_grad=True)
+      torch_z = torch_layer(torch_x)
+      np.testing.assert_allclose(z.numpy(), torch_z.detach().numpy(), atol=5e-6, rtol=5e-6)
+
+      # backward
+      z.sum().backward()
+      torch_z.sum().backward(retain_graph=True)
+      np.testing.assert_allclose(x.grad.numpy(), torch_x.grad.detach().numpy(), atol=1e-3, rtol=1e-3)
+      np.testing.assert_allclose(layer.weight.grad.numpy(), torch_layer.weight.grad.detach().numpy(), atol=2e-3, rtol=1e-3)
 
   def test_embedding(self):
     B, T, embed_size, vocab_size = 4, 10, 20, 28

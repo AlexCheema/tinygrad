@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 from typing import Optional, Union
 import argparse
-from tqdm import trange
 import numpy as np
 import tiktoken
 from tinygrad import Tensor, TinyJit, Device, GlobalCounters, Variable
-from tinygrad.helpers import Timing, DEBUG, getenv, fetch, colored
+from tinygrad.helpers import Timing, DEBUG, getenv, fetch, colored, trange
 from tinygrad.nn import Embedding, Linear, LayerNorm
 from tinygrad.nn.state import torch_load, load_state_dict, get_state_dict
 
@@ -35,7 +34,7 @@ class Attention:
       self.cache_kv = Tensor.zeros(2, bsz, MAX_CONTEXT, self.n_heads, self.head_dim, dtype=x.dtype).contiguous().realize()
 
     # update the cache
-    self.cache_kv.shrink((None, None,(start_pos,start_pos+seqlen),None,None)).assign(Tensor.stack([xk, xv])).realize()
+    self.cache_kv.shrink((None, None,(start_pos,start_pos+seqlen),None,None)).assign(Tensor.stack(xk, xv)).realize()
 
     if start_pos > 0:
       keys = self.cache_kv[0].shrink((None, (0, start_pos+seqlen), None, None))
