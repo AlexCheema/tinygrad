@@ -12,19 +12,8 @@ from tinygrad.tensor import Tensor
 from tinygrad.helpers import fetch
 
 BASEDIR = Path(__file__).parent / "kits19" / "data"
-PREPROCESSED_DIR =  Path(__file__).parent / "kits19" / "preprocessed"
-
-"""
-To download the dataset:
-```sh
-git clone https://github.com/neheller/kits19
-cd kits19
-pip3 install -r requirements.txt
-python3 -m starter_code.get_imaging
-cd ..
-mv kits19 extra/datasets
-```
-"""
+TRAIN_PREPROCESSED_DIR =  Path(__file__).parent / "kits19" / "preprocessed" / "train"
+VAL_PREPROCESSED_DIR =  Path(__file__).parent / "kits19" / "preprocessed" / "val"
 
 @functools.lru_cache(None)
 def get_train_files():
@@ -32,7 +21,7 @@ def get_train_files():
 
 @functools.lru_cache(None)
 def get_val_files():
-  data = fetch("https://raw.githubusercontent.com/mlcommons/training/master/image_segmentation/pytorch/evaluation_cases.txt").read_text()
+  data = fetch("https://raw.githubusercontent.com/mlcommons/training/master/retired_benchmarks/unet3d/pytorch/evaluation_cases.txt").read_text()
   return sorted([x for x in BASEDIR.iterdir() if x.stem.split("_")[-1] in data.split("\n")])
 
 def load_pair(file_path):
@@ -73,24 +62,22 @@ def preprocess(file_path):
   return image, label
 
 def preprocess_dataset(filenames, preprocessed_dir, val):
-  preprocessed_dataset_dir = (preprocessed_dir / ("val" if val else "train")) if preprocessed_dir is not None else None
-  if not preprocessed_dataset_dir.is_dir(): os.makedirs(preprocessed_dataset_dir)
+  if not preprocessed_dir.is_dir(): os.makedirs(preprocessed_dir)
   for fn in tqdm(filenames, desc=f"preprocessing {'validation' if val else 'training'}"):
     case = os.path.basename(fn)
     image, label = preprocess(fn)
     image, label = image.astype(np.float32), label.astype(np.uint8)
-    np.save(preprocessed_dataset_dir / f"{case}_x.npy", image, allow_pickle=False)
-    np.save(preprocessed_dataset_dir / f"{case}_y.npy", label, allow_pickle=False)
+    np.save(preprocessed_dir / f"{case}_x.npy", image, allow_pickle=False)
+    np.save(preprocessed_dir / f"{case}_y.npy", label, allow_pickle=False)
 
 def iterate(files, preprocessed_dir=None, val=True, shuffle=False, bs=1):
   order = list(range(0, len(files)))
-  preprocessed_dataset_dir = (preprocessed_dir / ("val" if val else "train")) if preprocessed_dir is not None else None
   if shuffle: random.shuffle(order)
   for i in range(0, len(files), bs):
     samples = []
     for i in order[i:i+bs]:
-      if preprocessed_dataset_dir is not None:
-        x_cached_path, y_cached_path = preprocessed_dataset_dir / f"{os.path.basename(files[i])}_x.npy", preprocessed_dataset_dir / f"{os.path.basename(files[i])}_y.npy"
+      if preprocessed_dir is not None:
+        x_cached_path, y_cached_path = preprocessed_dir / f"{os.path.basename(files[i])}_x.npy", preprocessed_dir / f"{os.path.basename(files[i])}_y.npy"
         if x_cached_path.exists() and y_cached_path.exists():
           samples += [(np.load(x_cached_path), np.load(y_cached_path))]
       else: samples += [preprocess(files[i])]
@@ -124,7 +111,7 @@ def pad_input(volume, roi_shape, strides, padding_mode="constant", padding_val=-
   paddings = [bounds[2]//2, bounds[2]-bounds[2]//2, bounds[1]//2, bounds[1]-bounds[1]//2, bounds[0]//2, bounds[0]-bounds[0]//2, 0, 0, 0, 0]
   return F.pad(torch.from_numpy(volume), paddings, mode=padding_mode, value=padding_val).numpy(), paddings
 
-def sliding_window_inference(model, inputs, labels, roi_shape=(128, 128, 128), overlap=0.5):
+def sliding_window_inference(model, inputs, labels, roi_shape=(128, 128, 128), overlap=0.5, gpus=None):
   from tinygrad.engine.jit import TinyJit
   mdl_run = TinyJit(lambda x: model(x).realize())
   image_shape, dim = list(inputs.shape[2:]), len(inputs.shape[2:])
@@ -153,7 +140,7 @@ def sliding_window_inference(model, inputs, labels, roi_shape=(128, 128, 128), o
   for i in range(0, strides[0] * size[0], strides[0]):
     for j in range(0, strides[1] * size[1], strides[1]):
       for k in range(0, strides[2] * size[2], strides[2]):
-        out = mdl_run(Tensor(inputs[..., i:roi_shape[0]+i,j:roi_shape[1]+j, k:roi_shape[2]+k])).numpy()
+        out = mdl_run(Tensor(inputs[..., i:roi_shape[0]+i,j:roi_shape[1]+j, k:roi_shape[2]+k], device=gpus)).numpy()
         result[..., i:roi_shape[0]+i, j:roi_shape[1]+j, k:roi_shape[2]+k] += out * norm_patch
         norm_map[..., i:roi_shape[0]+i, j:roi_shape[1]+j, k:roi_shape[2]+k] += norm_patch
   result /= norm_map

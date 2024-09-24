@@ -1,20 +1,21 @@
 # stuff needed to unpack a kernel
 from typing import Tuple
-from tinygrad.ops import LazyOp, TernaryOps, BinaryOps, UnaryOps, ReduceOps, BufferOps, MemBuffer, ConstBuffer
+from extra.ops import LazyOp, TernaryOps, BinaryOps, UnaryOps, ReduceOps, BufferOps, MemBuffer, ConstBuffer, MetaOps
 from tinygrad.codegen.kernel import Opt, OptOps
-from tinygrad.dtype import dtypes
+from tinygrad.ops import UOp, UOps, KernelInfo
+from tinygrad.dtype import dtypes, PtrDType
 from tinygrad.shape.shapetracker import ShapeTracker
 from tinygrad.shape.view import View
 from tinygrad.shape.symbolic import Variable, NumNode
 inf, nan = float('inf'), float('nan')
 
 # kernel unpacker
-from tinygrad.codegen.linearizer import Linearizer
-def ast_str_to_ast(ast_str:str) -> Tuple[LazyOp,...]: return val if isinstance(val:=eval(ast_str), tuple) else (val,)
-def ast_str_to_lin(ast_str:str, opts=None): return Linearizer(*ast_str_to_ast(ast_str), opts=opts)
+from tinygrad.codegen.kernel import Kernel
+def ast_str_to_ast(ast_str:str) -> UOp: return eval(ast_str)
+def ast_str_to_lin(ast_str:str, opts=None): return Kernel(ast_str_to_ast(ast_str), opts=opts)
 def kern_str_to_lin(kern_str:str, opts=None):
   (ast, applied_opts,) = eval(kern_str)
-  k = Linearizer(*ast, opts=opts)
+  k = Kernel(ast, opts=opts)
   for opt in applied_opts:
     k.apply_opt(opt)
   return k
@@ -27,7 +28,7 @@ from tinygrad.helpers import dedup
 def load_worlds(filter_reduce=True, filter_noimage=True, filter_novariable=True):
   fn = Path(__file__).parent.parent / "datasets/sops.gz"
   ast_strs = dedup(gzip.open(fn).read().decode('utf-8').strip().split("\n"))
-  if filter_reduce: ast_strs = [x for x in ast_strs if "ReduceOps" in x]
+  if filter_reduce: ast_strs = [x for x in ast_strs if "REDUCE_AXIS" in x]
   if filter_noimage: ast_strs = [x for x in ast_strs if "dtypes.image" not in x]
   if filter_novariable: ast_strs = [x for x in ast_strs if "Variable" not in x]
   random.seed(1337)
@@ -44,7 +45,7 @@ from tinygrad.shape.symbolic import Node
 
 MAX_DIMS = 16
 MAX_BUFS = 9
-def lin_to_feats(lin:Linearizer, use_sts=True):
+def lin_to_feats(lin:Kernel, use_sts=True):
   assert lin.shape_len < MAX_DIMS, "too many dims"
 
   all_colors = ["blue", "cyan", "white", "green", "red", "magenta", "yellow"]

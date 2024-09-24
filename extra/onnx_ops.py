@@ -56,7 +56,6 @@ Softmax = {1: Softmax_1, 13: Softmax_13}   # Softmax default axis changed
 def LogSoftmax(x: Tensor, axis=-1): return x.log_softmax(axis)
 def Clip(x: Tensor, min=None, max=None): return x.clip(float('-inf') if min is None else min, float('inf') if max is None else max).cast(x.dtype)
 
-# NOTE ReduceProd would require a new llop
 def _axes(axes, noop_with_empty_axes):
   if axes is not None and not (isinstance(axes, Tensor) and axes.shape == (0,)): return to_python_const(axes)
   return [] if noop_with_empty_axes else None
@@ -65,6 +64,7 @@ def ReduceMin(data: Tensor, axes=None, keepdims=1, noop_with_empty_axes=0): retu
 def ReduceSum(data: Tensor, axes=None, keepdims=1, noop_with_empty_axes=0): return data.sum(_axes(axes, noop_with_empty_axes), keepdim=keepdims)
 def ReduceMean(data: Tensor, axes=None, keepdims=1, noop_with_empty_axes=0): return data.mean(_axes(axes, noop_with_empty_axes), keepdim=keepdims)
 def ReduceSumSquare(data: Tensor, axes=None, keepdims=1, noop_with_empty_axes=0): return ReduceSum(data.square(), axes, keepdims, noop_with_empty_axes)
+def ReduceProd(data: Tensor, axes=None, keepdims=1, noop_with_empty_axes=0): return data.prod(_axes(axes, noop_with_empty_axes), keepdim=keepdims)
 def ReduceL1(data: Tensor, axes=None, keepdims=1, noop_with_empty_axes=0): return ReduceSum(data.abs(), axes, keepdims, noop_with_empty_axes)
 def ReduceL2(data: Tensor, axes=None, keepdims=1, noop_with_empty_axes=0): return ReduceSumSquare(data, axes, keepdims, noop_with_empty_axes).sqrt()
 def ReduceLogSum(data: Tensor, axes=None, keepdims=1, noop_with_empty_axes=0): return ReduceSum(data, axes, keepdims, noop_with_empty_axes).log()
@@ -174,14 +174,14 @@ def BatchNormalization(X: Tensor, scale, B, input_mean, input_var, epsilon=1e-05
 def InstanceNormalization(x: Tensor, scale: Tensor, bias: Tensor, epsilon=1e-05):
   axis = tuple(range(2, x.ndim))
   mean = x.mean(axis=axis, keepdim=True)
-  invstd = x.sub(mean).pow(2).mean(axis=axis, keepdim=True).add(epsilon).rsqrt()
+  invstd = x.sub(mean).square().mean(axis=axis, keepdim=True).add(epsilon).rsqrt()
   return x.sub(mean).mul(scale.reshape(shape=[-1, 1, 1])).mul(invstd).add(bias.reshape(shape=[-1, 1, 1]))
 
 def LayerNormalization(x: Tensor, scale, bias, axis=-1, epsilon=1e-05, stash_type=1):
   assert stash_type == 1, "only float32 is supported"
   axis = tuple(i for i in range(axis if axis >= 0 else x.ndim + axis, x.ndim))
   mean = x.mean(axis=axis, keepdim=True)
-  return x.layernorm(axis, epsilon).mul(scale).add(bias), mean, (x.sub(mean)).pow(2).mean(axis=axis, keepdim=True).add(epsilon).rsqrt()
+  return x.layernorm(axis, epsilon).mul(scale).add(bias), mean, (x.sub(mean)).square().mean(axis=axis, keepdim=True).add(epsilon).rsqrt()
 
 def GroupNormalization(x: Tensor, scale: Tensor, bias: Tensor, num_groups, epsilon=1e-05):
   return x.reshape(x.shape[0], num_groups, -1).layernorm(axis=-1, eps=epsilon).mul(scale.unsqueeze(-1)).add(bias.unsqueeze(-1)).reshape(x.shape)
@@ -532,9 +532,9 @@ def EyeLike(x: Tensor, dtype=None, k=0):
   else: dtype = DTYPE_MAP[int(dtype)]
   dim = min(x.shape)
   if x.shape[0] == x.shape[1]:
-    return Tensor.eye(dim=dim, dtype=dtype)
+    return Tensor.eye(dim, dtype=dtype)
   padarg = tuple(None if d == dim else (k, d-dim-k) for d in x.shape)
-  return Tensor.eye(dim=dim, dtype=dtype).pad(padarg)
+  return Tensor.eye(dim, dtype=dtype).pad(padarg)
 
 def Upsample(X, scales, mode): return Resize(X=X, scales=scales, mode=mode)
 
@@ -606,7 +606,7 @@ def SkipLayerNormalization(x:Tensor, skip:Tensor, gamma, beta:Optional[Tensor]=N
   return x.layernorm(eps=epsilon) * gamma + beta, None, None, x
 
 def FastGelu(x:Tensor, bias:Optional[Tensor]=None):
-  # this is tanh approamixated
+  # this is tanh approximated
   return (x + bias).gelu()
 
 def EmbedLayerNormalization(input_ids: Tensor, segment_ids:Optional[Tensor]=None, word_embedding:Tensor=None, position_embedding:Tensor=None, segment_embedding:Optional[Tensor]=None, gamma=None, beta=None, mask:Optional[Tensor]=None, position_ids:Optional[Tensor]=None, epsilon=None, mask_index_type=None):
@@ -645,7 +645,7 @@ def Attention(x:Tensor, weights, bias:Optional[Tensor]=None, mask_index:Optional
   if unidirectional:  # gpt-style
     assert hidden_size == v_hidden_size
     xqkv = x.linear(weights, bias)
-    xq, xk, xv = [xqkv._slice([None, None, (i*hidden_size, (i+1)*hidden_size)]) for i in range(3)]
+    xq, xk, xv = [xqkv.shrink([None, None, (i*hidden_size, (i+1)*hidden_size)]) for i in range(3)]
   else:  # bert-style
     wq, wk, wv = weights[:,:hidden_size], weights[:,hidden_size:hidden_size+v_hidden_size], weights[:,hidden_size+v_hidden_size:]
     bq, bk, bv = (bias[:hidden_size], bias[hidden_size:hidden_size+v_hidden_size], bias[hidden_size+v_hidden_size]) if bias is not None else None

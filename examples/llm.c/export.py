@@ -5,9 +5,9 @@ from tinygrad import Device, nn, Tensor, dtypes, Variable
 Device.DEFAULT = "CLANG"
 from train_gpt2 import GPT, GPTConfig
 from tinygrad.helpers import dedup, to_function_name, flatten, getenv, GRAPH, GlobalCounters, ansilen, to_function_name
-from tinygrad.engine.schedule import create_schedule, memory_planner
-from tinygrad.engine.realize import get_linearizer, run_schedule
-from tinygrad.ops import BufferOps, LoadOps
+from tinygrad.engine.schedule import create_schedule
+from tinygrad.engine.realize import get_kernel, memory_planner, run_schedule
+from tinygrad.ops import MetaOps, UOps
 
 TIMING = getenv("TIMING")
 
@@ -16,8 +16,7 @@ if __name__ == "__main__":
   #model.load_pretrained()
   for p in nn.state.get_parameters(model): p.replace(Tensor.empty(p.shape, dtype=p.dtype)) # fake load pretrained
 
-  seen = set()
-  #early_sched = create_schedule([x.lazydata for x in nn.state.get_parameters(model)], seen)
+  #early_sched = create_schedule([x.lazydata for x in nn.state.get_parameters(model)])
   #print(f"built model {len(early_sched)}")
 
   #B, T = Variable("B", 1, 128).bind(4), 64 #Variable("T", 1, 1024).bind(64)
@@ -38,15 +37,14 @@ if __name__ == "__main__":
       tensors = optimizer.schedule_step()
     else:
       tensors = []
-    sched = create_schedule([loss.lazydata] + [x.lazydata for x in tensors], seen)
+    sched = create_schedule([loss.lazydata] + [x.lazydata for x in tensors])
     print(f"calls {i}:", len(sched))
     #run_schedule(sched[:])
-  del seen  # free the LazyBuffers
   sched = memory_planner(sched)
-  ast_dedup = dedup([si.ast for si in sched if si.ast[0].op is BufferOps.STORE])
+  ast_dedup = dedup([si.ast for si in sched if si.ast.op is UOps.SINK])
   srcs = {}
   for ast in ast_dedup:
-    k = get_linearizer(Device["CLANG"].renderer, ast)
+    k = get_kernel(Device["CLANG"].renderer, ast)
     k.linearize()
     src = Device["CLANG"].renderer.render(to_function_name(k.name), k.uops)
     srcs[ast] = (k.name, src)
@@ -84,8 +82,8 @@ if __name__ == "__main__":
   for i,si in enumerate(sched):
     bufs = [(named_buffers.get(b, f"b{numbered_bufs[b]}"), b) for b in si.bufs]
     all_bufs += bufs
-    if si.ast[0].op is not BufferOps.STORE:
-      print(f"// {si.ast[0].op}", bufs)
+    if si.ast.op is not UOps.SINK:
+      print(f"// {si.ast.op}", bufs)
     else:
       print(f"{srcs[si.ast][0]}({', '.join([x[0] for x in bufs])})")
       main.append(f"  {to_function_name(srcs[si.ast][0])}({', '.join([x[0] for x in bufs])});")

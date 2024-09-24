@@ -1,3 +1,4 @@
+from __future__ import annotations
 from typing import Final, Optional, ClassVar, Set, Tuple, Dict, Union
 from dataclasses import dataclass
 import functools
@@ -12,36 +13,43 @@ class DType:
   name: str
   fmt: Optional[str]
   count: int
-  def __repr__(self): return f"dtypes.{'_'*(c:=self.count!=1)}{INVERSE_DTYPES_DICT[self.name if not c else self.scalar().name]}{str(self.count)*c}"
+  def __repr__(self): return f"dtypes.{INVERSE_DTYPES_DICT[self.scalar().name]}"+(f".vec({self.count})" if self.count > 1 else "")
   def vec(self, sz:int):
-    assert sz > 1 and self.count == 1, f"can't vectorize {self} with size {sz}"
+    assert self.count == 1, f"can't vectorize {self} with size {sz}"
+    if sz == 1 or self.name == 'void': return self  # void doesn't vectorize, and sz=1 is scalar
     return DType(self.priority, self.itemsize*sz, f"{INVERSE_DTYPES_DICT[self.name]}{sz}", None, sz)
-  def scalar(self): return DTYPES_DICT[self.name[:-len(str(self.count))]] if self.count > 1 else self
+  def scalar(self) -> DType: return DTYPES_DICT[self.name[:-len(str(self.count))]] if self.count > 1 else self
 
 # dependent typing?
 @dataclass(frozen=True, repr=False)
 class ImageDType(DType):
   shape: Tuple[int, ...]   # arbitrary arg for the dtype, used in image for the shape
   base: DType
+  local: bool = False  # images are never local
   def scalar(self): return self.base
   def vec(self, sz:int): return self.base.vec(sz)
   def __repr__(self): return f"dtypes.{self.name}({self.shape})"
 
 # @dataclass(frozen=True, init=False, repr=False, eq=False)
 class PtrDType(DType):
-  def __init__(self, dt:DType): super().__init__(dt.priority, dt.itemsize, dt.name, dt.fmt, dt.count)
-  def __repr__(self): return f"ptr.{super().__repr__()}"
+  def __init__(self, dt:DType, local=False):
+    self.base, self.local = dt, local
+    super().__init__(dt.priority, dt.itemsize, dt.name, dt.fmt, dt.count)
   def __hash__(self): return super().__hash__()
   def __eq__(self, dt): return self.priority==dt.priority and self.itemsize==dt.itemsize and self.name==dt.name and self.count==dt.count
   def __ne__(self, dt): return not (self == dt)
+  def __repr__(self): return f"PtrDType({super().__repr__()}, local=True)" if self.local else f"PtrDType({super().__repr__()})"
 
 class dtypes:
   @staticmethod
-  def is_float(x: DType) -> bool: return x.scalar() in (dtypes.float16, dtypes.bfloat16, dtypes.float32, dtypes.float64)
+  @functools.lru_cache(None)
+  def is_float(x: DType) -> bool: return x.scalar() in {dtypes.float16, dtypes.bfloat16, dtypes.float32, dtypes.float64}
   @staticmethod # static methds on top, or bool in the type info will refer to dtypes.bool
-  def is_int(x: DType) -> bool: return x.scalar() in (dtypes.int8, dtypes.int16, dtypes.int32, dtypes.int64) or dtypes.is_unsigned(x)
+  @functools.lru_cache(None)
+  def is_int(x: DType) -> bool: return x.scalar() in {dtypes.int8, dtypes.int16, dtypes.int32, dtypes.int64, dtypes.pyint} or dtypes.is_unsigned(x)
   @staticmethod
-  def is_unsigned(x: DType) -> bool: return x.scalar() in (dtypes.uint8, dtypes.uint16, dtypes.uint32, dtypes.uint64)
+  @functools.lru_cache(None)
+  def is_unsigned(x: DType) -> bool: return x.scalar() in {dtypes.uint8, dtypes.uint16, dtypes.uint32, dtypes.uint64}
   @staticmethod
   def from_py(x) -> DType:
     if x.__class__ is float: return dtypes.default_float
@@ -51,13 +59,30 @@ class dtypes:
     if x.__class__ is list or x.__class__ is tuple: return max(dtypes.from_py(xi) for xi in x) if x else dtypes.default_float
     raise RuntimeError(f"Could not infer dtype of {x} with type {type(x)}")
   @staticmethod
-  def as_const(val: ConstType, dtype:DType): return int(val) if dtypes.is_int(dtype) else float(val) if dtypes.is_float(dtype) else bool(val)
+  def as_const(val: Tuple[ConstType, ...]|ConstType, dtype:DType):
+    if isinstance(val, tuple):
+      assert len(val) == dtype.count, f"mismatch {val} {dtype}"
+      return tuple(dtypes.as_const(x, dtype) for x in val)
+    return int(val) if dtypes.is_int(dtype) else float(val) if dtypes.is_float(dtype) else bool(val)
   @staticmethod
+  @functools.lru_cache(None)
   def min(dtype:DType):
     if dtypes.is_int(dtype): return 0 if dtypes.is_unsigned(dtype) else -2**(dtype.itemsize*8-1)
     return -float("inf") if dtypes.is_float(dtype) else False
   @staticmethod
+  @functools.lru_cache(None)
+  def max(dtype:DType):
+    if dtypes.is_int(dtype): return (2**(dtype.itemsize*8-(0 if dtypes.is_unsigned(dtype) else 1)))-1
+    return float("inf") if dtypes.is_float(dtype) else True
+  @staticmethod
+  def finfo(dtype:DType) -> Tuple[int, int]:  # (exponent, mantissa)
+    if not dtypes.is_float(dtype): raise ValueError(f"{dtype} is not a floating point type")
+    return {dtypes.float16: (5, 10), dtypes.bfloat16: (8, 7), dtypes.float32: (8, 23), dtypes.float64: (11, 52)}[dtype]
+  @staticmethod
   def fields() -> Dict[str, DType]: return DTYPES_DICT
+  # TODO: priority should be higher than bool
+  void: Final[DType] = DType(-1, 0, "void", None, 1)
+  pyint: Final[DType] = DType(-1, 8, "pyint", None, 1)   # arbitrary precision integer, same itemsize to int64 so min/max works
   bool: Final[DType] = DType(0, 1, "bool", '?', 1)
   int8: Final[DType] = DType(1, 1, "char", 'b', 1)
   uint8: Final[DType] = DType(2, 1, "unsigned char", 'B', 1)
@@ -91,6 +116,9 @@ if (env_default_float := getenv("DEFAULT_FLOAT", "")):
   dtypes.default_float = getattr(dtypes, env_default_float.lower())
   assert dtypes.is_float(dtypes.default_float), f"{env_default_float} is not a float dtype"
 
+DTypeLike = Union[str, DType]
+def to_dtype(dtype:DTypeLike) -> DType: return dtype if isinstance(dtype, DType) else getattr(dtypes, dtype)
+
 # https://jax.readthedocs.io/en/latest/jep/9407-type-promotion.html
 # we don't support weak type and complex type
 promo_lattice = { dtypes.bool: [dtypes.int8, dtypes.uint8], dtypes.int8: [dtypes.int16], dtypes.int16: [dtypes.int32], dtypes.int32: [dtypes.int64],
@@ -107,8 +135,9 @@ def least_upper_dtype(*ds:DType) -> DType:
 def least_upper_float(dt:DType) -> DType: return dt if dtypes.is_float(dt) else least_upper_dtype(dt, dtypes.float32)
 
 # HACK: staticmethods are not callable in 3.8 so we have to compare the class
-DTYPES_DICT = {k: v for k, v in dtypes.__dict__.items() if not (k.startswith(('__', 'default')) or v.__class__ is staticmethod)}
+DTYPES_DICT = {k: v for k, v in dtypes.__dict__.items() if not (k.startswith(('__', 'default', 'void')) or v.__class__ is staticmethod)}
 INVERSE_DTYPES_DICT = {v.name:k for k,v in DTYPES_DICT.items()}
+INVERSE_DTYPES_DICT['void'] = 'void'
 
 def sum_acc_dtype(dt:DType):
   # default acc dtype for sum

@@ -1,12 +1,12 @@
 import random
 from extra.optimization.helpers import load_worlds, ast_str_to_lin
 from tinygrad.engine.search import actions
-from tinygrad.codegen.linearizer import Linearizer
+from tinygrad.codegen.kernel import Kernel
 from tinygrad.helpers import tqdm
 
 tactions = set()
 def test_rebuild(lin):
-  linr = Linearizer(*lin.ast)
+  linr = Kernel(lin.ast)
   for o in lin.applied_opts:
     assert o in actions, f"{o} is not in actions"
     tactions.add(o)
@@ -28,7 +28,7 @@ if __name__ == "__main__":
     # confirm linearize can be called twice
     uops1 = lin.linearize().uops
     uops2 = lin.linearize().uops
-    for x,y in zip(uops1.uops, uops2.uops):
+    for x,y in zip(uops1, uops2):
       # for some reason DEFINE_ACC is changing the arg
       if x.op != y.op or x.dtype != y.dtype: # or x.arg != y.arg:
         uops1.print()

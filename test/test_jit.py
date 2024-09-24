@@ -2,12 +2,14 @@
 import unittest, functools
 import numpy as np
 
+from hypothesis import given, settings, strategies as strat
 from test.helpers import assert_jit_cache_len
 from tinygrad.tensor import Tensor
 from tinygrad.engine.jit import TinyJit
 from tinygrad.device import Device
 from tinygrad.helpers import CI, Context
 from tinygrad.dtype import dtypes
+from extra.models.unet import ResBlock
 
 def _simple_test(add, extract=lambda x: x, N=10):
   for _ in range(5):
@@ -18,6 +20,19 @@ def _simple_test(add, extract=lambda x: x, N=10):
   assert_jit_cache_len(add, 1)
 
 class TestJit(unittest.TestCase):
+
+  @settings(deadline=2e4)
+  @unittest.skipUnless(Device.DEFAULT in ["LLVM", "CLANG"], f"no support on {Device.DEFAULT}")
+  @given(strat.sampled_from([Tensor.exp2, Tensor.log2, Tensor.sin]))
+  def test_approx_jit_timeout(self, op):
+    with Context(TRANSCENDENTAL=2):
+      model = [ResBlock(16, 24, 16) for _ in range(4)]
+      @TinyJit
+      def fw_approx(t, t2):
+        for l in model: t = l(t, t2)
+        return op(t).realize()
+      fw_approx(Tensor.empty(4, 16, 8, 8), Tensor.empty(1, 24))
+
   def test_simple_jit(self):
     @TinyJit
     def add(a, b): return (a+b).realize()
@@ -249,6 +264,47 @@ class TestJit(unittest.TestCase):
       o1 = jf3(a, b)
       res3.add(o1.numpy()[0][0])
     assert len(res3) == 5, "All values should be different, rand works in jit."
+    assert res3 != res2, "Jit rand is diff with diff seeds"
+
+  def test_jit_multiple_random_regen(self):
+    def f(a, b):
+      rn = Tensor.randn(*a.shape)
+      rn = rn * a
+      rn2 = Tensor.randn(*a.shape)
+      rn2 = rn2 * b
+      rn = rn + rn2
+      rn2 = rn2 + Tensor.randn(*a.shape)
+      return ((a+b)*rn).realize(), ((a+b)*rn2).realize()
+    a = Tensor.randn(10, 10).realize()  # realize these before resetting the random seed
+    b = Tensor.randn(10, 10).realize()
+
+    Tensor.manual_seed(1234)
+    jf = TinyJit(f)
+    res = set()
+    for _ in range(5):
+      o1, o2 = jf(a, b)
+      res.add(o1.numpy()[0][0])
+      res.add(o2.numpy()[0][0])
+    assert len(res) == 10, "All values should be different, rand works in jit."
+
+    Tensor.manual_seed(1234)
+    jf2 = TinyJit(f)
+    res2 = set()
+    for _ in range(5):
+      o1, o2 = jf2(a, b)
+      res2.add(o1.numpy()[0][0])
+      res2.add(o2.numpy()[0][0])
+    assert len(res2) == 10, "All values should be different, rand works in jit."
+    assert res == res2, "Jit rand is not reproducible with the same seed"
+
+    Tensor.manual_seed(3421)
+    jf3 = TinyJit(f)
+    res3 = set()
+    for _ in range(5):
+      o1, o2 = jf3(a, b)
+      res3.add(o1.numpy()[0][0])
+      res3.add(o2.numpy()[0][0])
+    assert len(res3) == 10, "All values should be different, rand works in jit."
     assert res3 != res2, "Jit rand is diff with diff seeds"
 
   def test_jit_realization_and_sampling(self):

@@ -1,7 +1,7 @@
 from __future__ import annotations
 import os, subprocess, pathlib, ctypes, tempfile, functools
 import Metal, libdispatch
-from typing import List, Set, Any, Tuple, Optional
+from typing import List, Any, Tuple, Optional
 from tinygrad.helpers import prod, getenv, DEBUG, unwrap2
 from tinygrad.device import Compiled, Compiler, CompileError, LRUAllocator
 from tinygrad.renderer.cstyle import MetalRenderer
@@ -40,7 +40,11 @@ class MetalProgram:
     data = libdispatch.dispatch_data_create(lib, len(lib), None, None)
     self.library = unwrap2(self.device.device.newLibraryWithData_error_(data, None))
     self.fxn = self.library.newFunctionWithName_(name)
-    self.pipeline_state = unwrap2(self.device.device.newComputePipelineStateWithFunction_error_(self.fxn, None))
+    descriptor = Metal.MTLComputePipelineDescriptor.new()
+    descriptor.setComputeFunction_(self.fxn)
+    descriptor.setSupportIndirectCommandBuffers_(True)
+    self.pipeline_state = unwrap2(self.device.device.newComputePipelineStateWithDescriptor_options_reflection_error_(
+      descriptor, Metal.MTLPipelineOption(0), None, None))
 
   def __call__(self, *bufs, global_size:Tuple[int,int,int]=(1,1,1), local_size:Tuple[int,int,int]=(1,1,1), vals:Tuple[int, ...]=(), wait=False):
     if prod(local_size) > self.pipeline_state.maxTotalThreadsPerThreadgroup(): raise RuntimeError(f"local size {local_size} bigger than {self.pipeline_state.maxTotalThreadsPerThreadgroup()} with exec width {self.pipeline_state.threadExecutionWidth()} memory length {self.pipeline_state.staticThreadgroupMemoryLength()}")  # noqa: E501
@@ -63,26 +67,27 @@ class MetalBuffer:
 class MetalAllocator(LRUAllocator):
   def __init__(self, device:MetalDevice):
     self.device:MetalDevice = device
-    self.track_cross_device: Set[MetalDevice] = set()
     super().__init__()
-  def free_cache(self):
-    self.device.synchronize()
-    for x in self.track_cross_device: x.synchronize()
-    self.track_cross_device.clear()
-    return super().free_cache()
   def _alloc(self, size:int, options) -> MetalBuffer:
     ret = self.device.device.newBufferWithLength_options_(size, Metal.MTLResourceStorageModeShared)
     if ret is None: raise MemoryError(f"Metal OOM while allocating {size=}")
     return MetalBuffer(ret, size)
   def _free(self, opaque:MetalBuffer, options): opaque.buf.release()
-  def transfer(self, dest:MetalBuffer, src:MetalBuffer, sz:int, src_dev: MetalDevice, **kwargs):
-    src_dev.synchronize()
-    command_buffer = self.device.mtl_queue.commandBuffer()
-    encoder = command_buffer.blitCommandEncoder()
+  def transfer(self, dest:MetalBuffer, src:MetalBuffer, sz:int, src_dev:MetalDevice, dest_dev:MetalDevice):
+    dest_dev.synchronize()
+    src_command_buffer = src_dev.mtl_queue.commandBuffer()
+    encoder = src_command_buffer.blitCommandEncoder()
     encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size_(src.buf, src.offset, dest.buf, dest.offset, sz)
     encoder.endEncoding()
-    command_buffer.commit()
-    self.device.mtl_buffers_in_flight.append(command_buffer)
+    if src_dev != dest_dev:
+      src_command_buffer.encodeSignalEvent_value_(src_dev.timeline_signal, src_dev.timeline_value)
+      dest_command_buffer = dest_dev.mtl_queue.commandBuffer()
+      dest_command_buffer.encodeWaitForEvent_value_(src_dev.timeline_signal, src_dev.timeline_value)
+      dest_command_buffer.commit()
+      dest_dev.mtl_buffers_in_flight.append(dest_command_buffer)
+      src_dev.timeline_value += 1
+    src_command_buffer.commit()
+    src_dev.mtl_buffers_in_flight.append(src_command_buffer)
   def from_buffer(self, src:memoryview) -> Optional[Any]:
     ret = self.device.device.newBufferWithBytesNoCopy_length_options_deallocator_(src, src.nbytes, Metal.MTLResourceStorageModeShared, None)
     if ret: self.device.mv_in_metal.append(src)
@@ -98,9 +103,14 @@ class MetalDevice(Compiled):
   def __init__(self, device:str):
     self.device = Metal.MTLCreateSystemDefaultDevice()
     self.mtl_queue = self.device.newCommandQueueWithMaxCommandBufferCount_(1024)
+    if self.mtl_queue is None: raise RuntimeError("Cannot allocate a new command queue")
+
     self.mtl_buffers_in_flight: List[Any] = []
     self.mv_in_metal: List[memoryview] = []
-    self.track_cross_buffer: List[Any] = []
+
+    self.timeline_signal = self.device.newSharedEvent()
+    self.timeline_value = 0
+
     from tinygrad.runtime.graph.metal import MetalGraph
     super().__init__(device, MetalAllocator(self), MetalRenderer(), MetalCompiler(None if getenv("METAL_XCODE") else self),
                      functools.partial(MetalProgram, self), MetalGraph)
@@ -108,4 +118,3 @@ class MetalDevice(Compiled):
     for cbuf in self.mtl_buffers_in_flight: wait_check(cbuf)
     self.mv_in_metal.clear()
     self.mtl_buffers_in_flight.clear()
-    self.track_cross_buffer.clear()
